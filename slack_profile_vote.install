@@ -1,0 +1,38 @@
+<?php
+
+/**
+	*	Implements hook_schema()
+	**/
+function slack_profile_vote_schema(){
+	$schema['slack_profile_votes'] = array(
+    'description' => 'Vote tracking.',
+    'fields' => array(
+      'uid' => array(
+        'description' => 'Voter drupal user id.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'candidate_slack_id' => array(
+        'description' => 'Slack votee ID string.',
+        'type' => 'varchar',
+        'length' => 20,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'week_year' => array(
+        'description' => 'Timestamp of the ISO-8601 week number of year.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array(
+      'uid',
+			'week_year',
+    ),
+  );
+  return $schema;
+}

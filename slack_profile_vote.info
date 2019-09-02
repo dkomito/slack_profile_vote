@@ -1,0 +1,10 @@
+name = Slack Profile Vote
+description = "A module for voting weekly on Slack Profile images"
+core = 7.x
+package = Other
+
+dependencies[] = slack
+
+stylesheets[all][] = slack-profile-vote.css
+
+scripts[] = slack_profile_vote.js

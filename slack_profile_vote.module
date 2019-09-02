@@ -1,0 +1,678 @@
+<?php
+
+/**
+ * Implements hook_permission().
+ *
+ *	Administer Permissions for the process.
+ *
+ */
+function slack_profile_vote_permission() {
+  return array(
+    'slack profile vote' => array(
+      'title' => t('Vote for Slack Profile Image'),
+      'description' => t('Access to entire Slack profile voting system.'),
+	  	'restrict access'=>true
+    ),
+    'slack profile vote admin' => array(
+      'title' => t('Slack Profile Voting Admin'),
+      'description' => t('User can manually send voting reminders, and other admin and development tasks.'),
+	  	'restrict access'=>true
+    ),
+	);
+}
+
+/**
+	*	implements hook_menu
+	**/
+function slack_profile_vote_menu(){
+	$items = array();
+	
+//	Voting
+	$items['slack-vote'] = array(
+		'title' => t('Slack Profile Photos'),
+		'page callback' => 'drupal_get_form',
+		'page arguments' => array('_slack_profile_vote_list'),
+		'access arguments' => array('slack profile vote'),
+	);
+	$items['slack-vote/%'] = $items['slack-vote'];
+	$items['slack-vote/%']['page arguments'][] = 1;
+	
+//	Leaderboards
+	$items['slack-vote-leaderboard'] = array(
+		'title' => t('Leaderboard'),
+		'page callback' => '_slack_profile_vote_leaderboard',
+		'access arguments' => array('slack profile vote'),
+	);
+	$items['slack-vote-leaderboard/%'] = $items['slack-vote-leaderboard'];
+	$items['slack-vote-leaderboard/%']['page arguments'][] = 1;
+
+//	Admin settings form
+	$items['admin/config/services/slack-profile-vote'] = array(
+	  'title' => 'Slack Profile Votes',
+	  'description' => 'Slack Account Tokens.',
+	  'page callback' => 'drupal_get_form',
+	  'page arguments' => array('_slack_profile_vote_settings'),
+	  'access arguments' => array('slack profile vote admin'),
+	  'type' => MENU_NORMAL_ITEM,
+	);
+	
+// Test Send Message
+	$items['slack-vote-send-message'] = array(
+		'title' => t('Send a message to Slack Profile'),
+		'page callback' => '_slack_profile_vote_send_vote_reminder',
+		'access arguments' => array('slack profile vote admin'),
+		'page arguments' => array(1),
+	);
+	
+// Test Send Message
+	$items['slack-vote-prod'] = array(
+		'title' => t('Send a message to Slack Profile'),
+		'page callback' => '_slack_profile_vote_send_vote_prod',
+		'access arguments' => array('slack profile vote admin'),
+		'page arguments' => array(1),
+	);
+	
+	return $items;
+}
+
+
+/**
+	*	Page Callback for listing Slack Profile images
+	**/
+function _slack_profile_vote_list($form, &$form_state, $refresh=NULL){
+//	Get Users
+	$users = _slack_profile_vote_get_users($refresh);
+
+//	Get the Slack ID of the current user
+	global $user;
+	$week_year = strtotime(date('Y\WW'));
+	$query = db_select('slack_profile_votes', 'esv');
+	$query->addField('esv', 'candidate_slack_id', 'candidate_slack_id');
+	$query->condition('uid', $user->uid);
+	$query->condition('week_year', $week_year);
+	$candidate_slack_id = $query->execute()->fetchField(0);
+	
+	$thumbs = array();
+	$inc = 1;
+//	Try to match-up other users' Drupal Accounts with their Slack Accounts
+	$_manual_links = explode("\n", variable_get('slack_profile_vote_profile_links',''));
+	$manual_links = array();
+	if(count($_manual_links)){
+		foreach($_manual_links as $link){
+			if(!empty($link)){
+				list($prefix, $profile_name) = explode('|', $link);
+				$manual_links[$prefix] = $profile_name;
+			}
+		}
+	}
+	$prefix = substr($user->mail, 0, strpos($user->mail, '@'));
+	
+//	Create a render array of profile image thumnnails
+	foreach($users as $member){
+		$same_name = (strtolower(trim($user->name)) == strtolower(trim($member->real_name)));
+		$same_email = ($prefix == $member->name);
+		$same_class = ((isset($manual_links[$prefix]) && $manual_links[$prefix] == $member->name) || $same_email || $same_name ? 'same' : '' );
+		$chosen_class = ($candidate_slack_id == $member->id ? 'chosen' : '' );
+		$thumbs[] = array(
+			'thumb' => array(
+				'#type' => 'container',
+				'#attributes' => array( 'class' => array('thumb', $chosen_class, $same_class), 'title' => $member->real_name),
+				'wrapper' => array(
+					'#type' => 'container',
+					'#attributes' => array( 'class' => array('wrapper'), 'data-candidate_slack_id' => $member->id),
+					'image' => array(
+						'#theme' => 'image',
+						'#path' => $member->profile->image_192,
+					),
+					'overlay' => array(
+						'#type' => 'container',
+						'#attributes' => array(
+							'class' => array('overlay'),
+						//	'style' => 'background-image: url(\'' . $member->profile->image_192 . '\')',
+						),
+						'label' => array(
+							'#type' => 'container',
+							'#attributes' => array(
+								'class' => array('label'),
+							),
+							'markup' => array(
+								'#type' => 'markup',
+								'#markup' => '@' . $member->name,
+							),
+						),
+					),
+				)
+			),			
+		);
+	}
+	
+	drupal_set_title('Slack Theme Voting' /*. ' - This Week\'s Theme: Christmas Movies'*/); 
+			// Thinking about an easy mechanism for reiterating the week's theme
+	
+	drupal_add_library('system', 'effects.bounce');
+	
+//	Wrap the thumbs in some headings and containers
+//	Add divs for containers as well
+	$form = array(
+		'sub_header' => array(
+			'#type' => 'container',
+			'#attributes' => array( 'class' => array('slack-sub-header', 'clearfix')),
+			'leaderboard' => array(
+				'#theme'=>'link',
+				'#text' => 'Leaderboard',
+				'#path' => 'slack-vote-leaderboard',
+				'#options' => array('html'=>FALSE, 'attributes' => array('class' => array('heading-link'))),
+			),
+			'refresh' => array(
+				'#theme'=>'link',
+				'#text' => 'Refresh from Slack',
+				'#path' => 'slack-vote/1',
+				'#options' => array('html'=>FALSE, 'attributes' => array('class' => array('heading-link'))),
+			),
+			'message' => array(
+				'#theme'=>'html_tag',
+				'#tag' => 'h3',
+				'#value' => t('Click on a thumbnail to vote for a team member'),
+				'#attributes' => array('class' => array('message')),
+			),	
+		),		
+		'list' => array(
+			'#type' => 'container',
+			'#attributes' => array( 'class' => array('slack-votes')),
+			'thumbs' => $thumbs,
+			'candidate_slack_id' => array(
+				'#type' => 'textfield',
+				'#ajax' => array(
+					'callback' => '_slack_profile_vote_submit_vote',
+					'method' => 'replace',
+					'effect' => 'fade',
+					'event' => 'change',
+				),
+				'#prefix' => '<div id="candidate-slack-id">',
+				'#suffix' => '</div>',
+			),
+			'no_same' => array(
+				'#type' => 'container',
+				'#attributes' => array( 'id' => 'slack-no-same', 'class' => array('popup' , 'no-same')),
+				'bg' => array(
+					'#theme' => 'html_tag',
+					'#tag' => 'div',
+					'#attributes' => array( 'class' => array('bg')),
+					'#value' => '',
+				),
+				'box' => array(
+					'#type' => 'container',
+					'#attributes' => array( 'class' => array('box')),
+					'wrapper' => array(
+						'#type' => 'container',
+						'#attributes' => array( 'class' => array('wrapper', 'clearfix')),
+						'header' => array(
+							'#theme' => 'html_tag',
+							'#tag' => 'h3',
+							'#value' => t('You can\'t vote for yourself.'),
+						),
+						'image' => array(
+							'#theme' => 'image',					
+							'#path' => drupal_get_path('module', 'slack_profile_vote') . '/images/silly-billy.jpg',
+						),
+						'close' => array(
+							'#theme' => 'html_tag',
+							'#tag' => 'div',
+							'#value' => 'X',
+							'#attributes' => array( 'class' => array('close')),
+						),
+					),
+				),
+			),
+			'thank_you' => array(
+				'#type' => 'container',
+				'#attributes' => array( 'id' => 'thank-you', 'class' => array('thank-you', 'popup')),
+				'bg' => array(
+					'#theme' => 'html_tag',
+					'#tag' => 'div',
+					'#attributes' => array( 'class' => array('bg')),
+					'#value' => '',
+				),
+				'box' => array(
+					'#type' => 'container',
+					'#attributes' => array( 'class' => array('box')),
+					'wrapper' => array(
+						'#type' => 'container',
+						'#attributes' => array( 'class' => array('wrapper', 'clearfix')),
+						'header' => array(
+							'#theme' => 'html_tag',
+							'#tag' => 'h2',
+							'#value' => t('Vote Entered!'),
+						),
+						'image' => array(
+							'#theme' => 'image',
+							'#attributes' => array( 'class' => array('image')),
+						),
+						'body' => array(
+							'#theme' => 'html_tag',
+							'#tag' => 'p',
+							'#attributes' => array( 'id' => 'thank-you-body', 'class' => array('body')),
+							'#value' => t('You have voted for ') .
+													'<span class="name"></span>'.
+													l( t('Check out the Leaderboard'), 'slack-vote-leaderboard', array('options' => array( 'attributes' => array( 'class' => array('name'))))) . 
+													'<span class="notes">' . t('You can change your vote anytime before next week just by clicking on a different thumbnail.') . '</span>',
+							
+						),
+						'close' => array(
+							'#theme' => 'html_tag',
+							'#tag' => 'div',
+							'#value' => 'X',
+							'#attributes' => array( 'class' => array('close')),
+						),
+					),
+				),
+			),
+		),
+	);
+
+	return $form;
+}
+
+/**
+	*	Submit handler for the vote ( Change if one exists for the week)
+	**/
+function _slack_profile_vote_submit_vote($form, $form_state) {
+	global $user;
+	$candidate_slack_id = $form_state['input']['candidate_slack_id'];
+	$week_year = strtotime(date('Y\WW'));
+	$query = db_query("REPLACE slack_profile_votes (uid, candidate_slack_id, week_year) VALUES (:uid, :candidate_slack_id, :week_year)",
+		array(':uid' => $user->uid, ':candidate_slack_id' => $candidate_slack_id, ':week_year' => $week_year)
+	);
+  return NULL;
+}
+
+
+/**
+	*	Page Callback for the admin settings page
+	**/
+function _slack_profile_vote_settings($form){
+	
+	// CURL token
+	$form['slack_profile_vote_curl_token'] = array(
+	  '#type' => 'textfield',
+	  '#title' => t('Slack Account CURL Token'),
+	  '#default_value' => variable_get('slack_profile_vote_curl_token', ''),
+	  '#description' => t('In order to get the API Token visit: https://api.slack.com/custom-integrations/legacy-tokens\nThe token will look something like this `xoxo-2100000415-0000000000-0000000000-ab1ab1`'),
+	);
+	
+	// Services URL
+	$form['slack_profile_vote_services_url'] = array(
+	  '#type' => 'textfield',
+	  '#title' => t('Slack Account CURL Token'),
+	  '#default_value' => variable_get('slack_profile_vote_services_url', ''),
+	  '#description' => t('A URL for making Slack Posts')
+	);
+	
+	// Number of Votes required for Thank You message
+	$form['slack_profile_vote_thank_you_threshold'] = array(
+	  '#type' => 'textfield',
+	  '#title' => t('Thank you message threshold'),
+	  '#default_value' => variable_get('slack_profile_vote_thank_you_threshold', 15),
+	  '#description' => t('How many votes must be entered in order to receive a thank you message?')
+	);
+
+	return system_settings_form($form);
+}
+
+
+/**
+	*	Page Callback for the leaderboard
+	**/
+function _slack_profile_vote_leaderboard($specified_date=NULL){		
+	
+//	Base query
+	$query = db_select('slack_profile_votes', 'esv');
+	$query->fields('esv', array());
+	
+//	Determine timeframe 
+	$week_year = NULL;
+	if(!empty($specified_date)){
+		list($year, $month, $day) = explode('-', $specified_date);
+		if(!empty($day)){
+			$week_year = strtotime(date('Y\WW', strtotime($specified_date)));
+		}
+	}
+	if(!$week_year && !isset($year)){
+		$week_year = strtotime(date('Y\WW'));
+	}	
+	
+//	Get weekly votes	
+	if($week_year){
+		$query->condition('week_year', $week_year);
+		drupal_set_title(t('Leaderboard for the week of ') . date('M. jS Y', $week_year));
+	}	
+//	Get monthly votes
+	else if(isset($month)){
+		if(!($cache = cache_get('_slack_profile_vote_date_weeks_' . $year))){
+			$mw_data = array();
+			for($i = 1; $i <= 52; $i++){
+				$m = date('n', strtotime($year . 'W' . str_pad($i, 2, '0', STR_PAD_LEFT)));
+				$mw_data[$m][] = $i;
+			}
+			cache_set('_slack_profile_vote_date_weeks_' . $year, $mw_data, 'cache');
+		}
+		else{
+			$mw_data = $cache->data;
+		}
+		$db_or = db_or();
+		foreach($mw_data[(int)$month] as $w){
+			$db_or->condition('week_year', strtotime($year . 'W' . str_pad($w, 2, '0', STR_PAD_LEFT)));
+		}
+		$query->condition($db_or);
+		
+		drupal_set_title(t('Leaderboard for ') . date('F', strtotime($month . '/01/' . $year)));
+	}
+	else{		
+		$week_1 = strtotime($year .'W01');
+		$week_2 = strtotime($year .'W52');
+		$query->where("week_year BETWEEN {$week_1} AND {$week_2}");
+		drupal_set_title(t('Leaderboard for ') . $year);
+	}
+	
+	$query->addExpression("COUNT(uid)", 'votes');
+	$query->groupBy('candidate_slack_id');
+	$query->orderBy('votes', 'desc');
+	
+	$leaders = $query->execute()->fetchAll();
+	
+	$all_users = _slack_profile_vote_get_users($refresh);
+	
+	$thumbs = array();
+	foreach($leaders as $leader){
+		foreach($all_users as $member){
+			if($member->id == $leader->candidate_slack_id){
+				$thumb = array(
+					'thumb' => array(
+						'#type' => 'container',
+						'#attributes' => array( 'class' => array('thumb'), 'title' => $member->real_name),
+						'image' => array(
+							'#theme' => 'image',
+							'#path' => $member->profile->image_72,
+							'#suffix' => $member->real_name . ' (@' . $member->name . ') - ' . $leader->votes . t(' Votes'),
+						),
+					),			
+				);
+				$thumbs[] = drupal_render($thumb);
+				break;
+			}
+		}
+	}
+	
+	
+	$build = array(
+		'sub_header' => array(
+			'#type' => 'container',
+			'#attributes' => array( 'class' => array('slack-sub-header', 'leaderboard-header', 'clearfix')),
+			'heading_links' => array(
+				'#theme'=>'link',
+				'#text' => '< Back to Voting',
+				'#path' => 'slack-vote',
+				'#options' => array('html'=>FALSE, 'attributes' => array('class' => array('heading-link'))),
+			),
+		),
+		'list' => array(
+			'#theme' => 'item_list',
+			'#items' => $thumbs,
+			'#attributes' => array('class' => array('leaderboard')),
+		),
+	);
+	
+	if(!isset($month)){
+		$this_month = strtotime(date('Y\WW'));
+		$build['sub_header']['monthly_board'] = array(
+			'#theme'=>'link',
+			'#text' => 'View ' . date('F', $this_month) . ' Leaders',
+			'#path' => 'slack-vote-leaderboard/' . date('Y-m', $this_month),
+			'#options' => array('html'=>FALSE, 'attributes' => array('class' => array('heading-link'))),
+		);
+		$this_last_month =  strtotime(date('Y-m-d', strtotime(' -1 month')));
+		$build['sub_header']['last_monthly_board'] = array(
+			'#theme'=>'link',
+			'#text' => 'View ' . date('F', $this_last_month) . ' Leaders',
+			'#path' => 'slack-vote-leaderboard/' . date('Y-m', $this_last_month),
+			'#options' => array('attributes' => array('class' => array('heading-link'))),
+		);
+	}
+	else{
+		$build['sub_header']['weekly_board'] = array(
+			'#theme'=>'link',
+			'#text' => 'View Weekly Leaders',
+			'#path' => 'slack-vote-leaderboard/',
+			'#options' => array('attributes' => array('class' => array('heading-link'))),
+		);		
+	}
+	
+	return $build;
+}
+
+
+/**
+	*	Get user data from Slack
+	**/
+function _slack_profile_vote_get_users($refresh=0){
+	if (!($cache = cache_get('slack_user_list')) || $refresh == 1) {
+		$data = array(
+		//		"channel" => '', //"#mychannel",
+		//		"username" => "MySlackBot",
+		);
+		
+		$response = _slack_profile_vote_curl_post("https://slack.com/api/users.list", $data);
+		$users = $response->members;
+		
+		foreach($users as $key => $member){
+			if($member->deleted){
+				unset($users[$key]);
+			}
+		}
+		
+		if(!function_exists('_sort_by_updated')){
+			function _sort_by_updated($a, $b){
+				$a_date = str_replace('https://avatars.slack-edge.com/', '', $a->profile->image_192);
+				$a_date = substr($a_date, 0, strpos($a_date, '/'));
+				$a_date = strtotime($a_date);
+				$b_date = str_replace('https://avatars.slack-edge.com/', '', $b->profile->image_192);
+				$b_date = substr($b_date, 0, strpos($b_date, '/'));
+				$b_date = strtotime($b_date);
+				if ($a_date == $b_date) {
+					return 0;
+				}
+				return ($a_date > $b_date) ? -1 : 1;
+			}
+		}
+		usort($users, '_sort_by_updated');
+	//	Cache for a half-hour
+		cache_set('slack_user_list', $users, 'cache',  time() + (60*30));
+		watchdog('slack_profile_vote', 'User Profiles refreshed from Slack');
+	}
+	else{		
+		$users = $cache->data;
+	}
+	return $users;
+}
+
+
+/**
+	*	Page Callback for listing Slack Profile images
+	**/
+function _slack_profile_vote_curl_post($url, array $post = array(), array $options = array()){ 
+	$post['token'] = variable_get('slack_profile_vote_curl_token', '');
+	$defaults = array( 
+			CURLOPT_POST => 1, 
+			CURLOPT_HEADER => 0, 
+			CURLOPT_URL => $url, 
+			CURLOPT_FRESH_CONNECT => 1, 
+			CURLOPT_RETURNTRANSFER => 1, 
+			CURLOPT_FORBID_REUSE => 1, 
+			CURLOPT_TIMEOUT => 4, 
+			CURLOPT_POSTFIELDS => http_build_query($post) 
+	); 
+	$ch = curl_init(); 
+	curl_setopt_array($ch, ($options + $defaults)); 
+	if( ! $result = curl_exec($ch)) 
+	{ 
+			trigger_error(curl_error($ch)); 
+	} 
+	curl_close($ch); 
+	return json_decode($result); 
+} 
+
+/**
+ * @implments hook_cron
+ *
+ * 
+ */
+function slack_profile_vote_cron($refresh=FALSE) {
+	if (!($cache = cache_get('slack_profile_vote_cron')) || $refresh == TRUE) {
+
+	//	Send a reminder at a random time (Between 8 and 11) on Thursday mornings 
+		$day = date('w');
+		$seconds = (8*3600) + rand(0, (3*3600));
+		if($day == 4){
+			watchdog('slack_profile_vote', t('Reminder of Slack Vote should fire at ' . date('m/d/y g:i a', strtotime('+' . $seconds . ' seconds')))); 
+			sleep($seconds);
+			_slack_profile_vote_send_vote_reminder();
+			watchdog('slack_profile_vote', t('Reminded of Slack Vote at ' . date('G:i a'))); 
+		}
+	//	Send a reminder at a random time (Between 8 and 11) on Friday mornings
+		else if($day == 5){
+			watchdog('slack_profile_vote', t('Prod of Slack Vote should fire at ' . date('m/d/y g:i a', strtotime('+' . $seconds . ' seconds')))); 
+			sleep($seconds);
+			_slack_profile_vote_send_vote_prod();
+			watchdog('slack_profile_vote', t('Prodded about Slack Vote at ' . date('G:i a'))); 
+		}
+		
+	//	Cache for just under a day
+		cache_set('slack_profile_vote_cron', TRUE, 'cache',  time() + ((60*60*24) - 1));
+	}
+	
+	return;
+}
+
+/**
+ * Send a Message to a Slack Channel.
+ */
+function _slack_profile_vote_send_message($message='Blah'){
+	$ch = curl_init(variable_get('slack_profile_vote_services_url', ''));
+	$data = array('payload' => json_encode(array(     
+		"channel" => "#devtest", //"#mychannel",
+		"text" => '<!channel> TEST', //"Hello, Foo-Bar channel message.",
+		"username" => 'Voting App',
+	)));
+	curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+	curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+	$result = curl_exec($ch);
+	curl_close($ch);
+	return '';
+}
+
+/**
+ * Vote Reminder.
+ * 
+ */
+function _slack_profile_vote_send_vote_reminder(){
+	$images = array(
+		'public-files/vote-funny.jpg',
+		'public-files/obeyvote.jpg',
+		'vote-corgi.jpg',
+		'vote-cat.jpg',
+	);
+// #general
+	global $base_url, $base_path;
+	$ch = curl_init(variable_get('slack_profile_vote_services_url', ''));
+	$data = array('payload' => json_encode(array(     
+		"channel" => "#general", //"#mychannel",
+		"text" => '<!channel> Don\'t forget to vote for this week\'s best profile image. <' . $base_url . $base_path . 'slack-vote|' . $_SERVER['SERVER_NAME'] .  '/slack-vote>', //"Hello, Foo-Bar channel message.",
+		"username" => 'Voting App',
+		'attachments' => array(
+			array(
+			 "title" => "Vote Now!",
+			 "image_url" => drupal_get_path('module', 'slack_profile_vote') . '/images/' . $images[rand(0, count($images) - 1)],
+			)
+		),
+		"unfurl_media" => true,
+		"response_type" => "in_channel",
+	)));
+	curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+	curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+	$result = curl_exec($ch);
+	curl_close($ch);
+	return '';
+}
+
+
+/**
+ * Vote Prod.
+ * 
+ */
+function _slack_profile_vote_send_vote_prod(){
+	
+	$prod_images = array(
+		'public-files/25kbv8.jpg',
+		'public-files/bm-robin.jpg',
+		'vote-fellow-kids.jpg',
+		'vote-car-salesman.jpg',
+		'vote-angry-toddler.jpg',
+	);
+	$thanks_images = array(
+		'public-files/25kdpf.jpg',
+		'public-files/t-hanks.jpg',
+		'elvis-thank-you.jpg',
+		'public-files/h-hoff.jpg',
+	);
+	$ch = curl_init(variable_get('slack_profile_vote_services_url', ''));
+
+	$query = db_select('slack_profile_votes', 'esv');
+	$query->addExpression("COUNT(*)", 'qty');
+	$week_year = strtotime(date('Y\WW'));
+	$query->condition('week_year', $week_year);
+	$voted_qty = $query->execute()->fetchField(0);
+	
+	$users = _slack_profile_vote_get_users(TRUE);
+	
+	if($voted_qty == count($users)){
+		$title = t('Thank You!');
+		$message = 'Everyone has voted!!! Thank you everyone for participating!!!';
+		$images = $thanks_images;
+	}
+	else if($voted_qty < variable_get('slack_profile_vote_thank_you_threshold', 15)){
+		$title = t('Vote Now!');
+		$message = "Only " . $voted_qty . ' of ' . count($users) . ' users have voted for the best theme-based profile picture! Please Vote Now!';
+		$images = $prod_images;
+	}
+	else{
+		$title = t('Thank You!');
+		$message = $voted_qty . ' of ' . count($users) . ' users have voted for the best theme based-profile picture! Great participation! If you have not yet, please Vote Now!';	
+		$images = $thanks_images;	
+	}
+
+	global $base_url, $base_path;
+	$data = array('payload' => json_encode(array(     
+		"channel" => "#general", //"#mychannel",
+		"text" => '<!channel> ' . $message . '. <' . $base_url . $base_path . 'slack-vote|' . $_SERVER['SERVER_NAME'] .  '/slack-vote>', 
+		"username" => 'Voting App',
+		'attachments' => array(
+			array(
+			 "title" => $title,
+			 "image_url" => drupal_get_path('module', 'slack_profile_vote') . '/images/' . $images[rand(0, count($images) - 1)],
+			)
+		),
+		"unfurl_media" => true,
+		"response_type" => "in_channel",
+	)));
+	curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'POST');
+	curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+	curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+	curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+	$result = curl_exec($ch);
+	curl_close($ch);
+	return '';
+}
