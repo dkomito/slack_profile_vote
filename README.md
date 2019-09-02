@@ -13,6 +13,5 @@ Features
 Install as you would a normal Drupal 7 module
  
 ToDo:
-
-Get paging links for historical leaderboards
+- Get paging links for historical leaderboards
   
